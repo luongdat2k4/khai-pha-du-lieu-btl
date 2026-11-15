@@ -26,10 +26,10 @@ def sample_valid_df():
 
 def test_priority_level_policy():
     assert compute_priority_level(0.15) == "Thấp"
-    assert compute_priority_level(0.39) == "Thấp"
-    assert compute_priority_level(0.40) == "Trung bình"
-    assert compute_priority_level(0.65) == "Trung bình"
-    assert compute_priority_level(0.70) == "Cao"
+    assert compute_priority_level(0.29) == "Thấp"
+    assert compute_priority_level(0.30) == "Trung bình"
+    assert compute_priority_level(0.55) == "Trung bình"
+    assert compute_priority_level(0.60) == "Cao"
     assert compute_priority_level(0.95) == "Cao"
 
 

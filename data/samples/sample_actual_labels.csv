@@ -1,0 +1,3 @@
+snapshot_id,actual_churn,observed_at,source,note
+snap_example_001,Yes,2026-11-15T00:00:00Z,CSKH / Tổng đài,Khách báo chuyển mạng
+snap_example_002,No,2026-11-15T00:00:00Z,Hệ thống thanh toán,Đã gia hạn cước tháng

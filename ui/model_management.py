@@ -1,4 +1,6 @@
-"""Màn hình Quản lý mô hình & Huấn luyện lại: Kiểm tra gate, chạy dry-run, kích hoạt và rollback."""
+"""Màn hình Quản lý mô hình & Huấn luyện lại theo Plan 05 Section 5:
+Kiểm tra gate, ngày retrain gần nhất, chạy dry-run, kích hoạt an toàn và rollback.
+"""
 
 import os
 import json
@@ -13,7 +15,7 @@ from telco_churn.registry import (
 )
 from telco_churn.storage import (
     get_snapshots_with_labels,
-    get_model_versions_from_db,
+    get_training_runs,
 )
 from telco_churn.retraining import (
     run_retraining,
@@ -24,10 +26,13 @@ from telco_churn.retraining import (
 
 def render_model_management():
     st.title("⚙️ Quản Lý Mô Hình & Chu Trình Huấn Luyện Lại")
-    st.markdown("Theo dõi tình trạng mô hình active, kiểm tra các điều kiện cổng an toàn (*Gate*), chạy thử nghiệm huấn luyện candidate (*Dry-run*) và thực hiện hoàn tác (*Rollback*).")
+    st.markdown(
+        "Theo dõi tình trạng mô hình active, kiểm tra các điều kiện cổng an toàn (*Gate*), "
+        "chạy thử nghiệm huấn luyện candidate (*Dry-run/Demo*), đối chiếu candidate vs champion và thực hiện hoàn tác (*Rollback*)."
+    )
 
-    # 1. Current Active Model
-    st.subheader("1. Mô Hình Đang Phục Vụ (Active Champion)")
+    # 1. Current Active Model & Last Retrain Date
+    st.subheader("1. Mô Hình Đang Phục Vụ (Active Champion) & Tình Trạng Vận Hành")
 
     try:
         active_info = get_active_model_info()
@@ -39,24 +44,30 @@ def render_model_management():
         st.error(f"❌ Không thể đọc active_model.json: {e}")
         return
 
+    # Check last retrain run
+    last_runs = get_training_runs(limit=1)
+    last_retrain_str = "Chưa thực hiện"
+    if not last_runs.empty:
+        last_retrain_str = last_runs.iloc[0]["started_at"][:19].replace("T", " ")
+
     ac1, ac2, ac3, ac4 = st.columns(4)
     with ac1:
         st.metric("Phiên bản Active", active_ver)
     with ac2:
-        st.metric("Kiến trúc", active_type)
+        st.metric("Kiến trúc", active_type.replace("_", " ").title())
     with ac3:
         st.metric("Phiên bản trước", prev_ver or "Gốc")
     with ac4:
-        st.metric("Cập nhật lúc", updated_at[:19].replace("T", " ") if updated_at != "N/A" else "N/A")
+        st.metric("Ngày Retrain gần nhất", last_retrain_str)
 
     st.markdown("---")
 
     # 2. Retraining Gate Checklist
     st.subheader("2. Kiểm Tra Cổng Điều Kiện Huấn Luyện Lại (Monthly Gate Checklist)")
     st.markdown("""
-    > [!NOTE]
-    > Theo chính sách Plan 06 Section 4, mô hình chỉ được phép bước vào chu trình huấn luyện lại khi thỏa mãn 
-    > đồng thời các tiêu chí cổng an toàn về số lượng và cân bằng dữ liệu nhãn thật.
+    > [!IMPORTANT]
+    > **Chính sách cổng an toàn (Plan 06 Section 4):** Mô hình chỉ được phép bước vào chu trình huấn luyện lại khi thỏa mãn 
+    > đồng thời các tiêu chí cổng an toàn về số lượng hồ sơ mới và sự cân bằng giữa hai lớp nhãn thực tế (*Actual Churn*).
     """)
 
     cfg = load_retraining_config()
@@ -85,14 +96,20 @@ def render_model_management():
             st.warning("🟡 CHƯA ĐỦ ĐIỀU KIỆN")
 
     if not gate_passed:
-        with st.expander("⚠️ Chi tiết lý do chưa đạt cổng an toàn:", expanded=True):
+        with st.expander("⚠️ Chi tiết các lý do chưa đạt cổng an toàn:", expanded=True):
             for fail in gate_details["failures"]:
                 st.write(f"- {fail}")
 
     st.markdown("---")
 
     # 3. Interactive Actions: Dry-run and Demo
-    st.subheader("3. Thao Tác Huấn Luyện Lại & Kiểm Thử So Sánh")
+    st.subheader("3. Thao Tác Huấn Luyện Lại & Đánh Giá So Sánh")
+    st.markdown("""
+    > [!NOTE]
+    > **Nguyên tắc an toàn (Plan 05 Section 5):** 
+    > - Không có nút bấm "thay thế mô hình mù quáng". Mọi thao tác kích hoạt candidate đều phải tuân thủ điều kiện thăng cấp khách quan (F1 gain ≥ 0.01 và Recall drop ≤ 0.02).
+    > - **Dữ liệu demo là dữ liệu mô phỏng (Synthetic):** Hệ thống gắn nhãn minh bạch trên màn hình; tuyệt đối không lấy dữ liệu Test Set gốc nạp vào cơ sở dữ liệu để tạo cảm giác hệ thống đang tự học thêm.
+    """)
 
     act_col1, act_col2 = st.columns(2)
 
@@ -103,13 +120,13 @@ def render_model_management():
             with st.spinner("Đang chạy kiểm tra gate..."):
                 res = run_retraining(dry_run=True)
                 if res["decision"] == "SKIP":
-                    st.warning(f"⏩ Kết quả: **SKIP** — Lý do: {res['reason']}")
+                    st.warning(f"⏩ Quyết định: **SKIP**\n\nLý do: {res['reason']}")
                 else:
                     st.info(f"Kết quả: **{res['decision']}** — {res['reason']}")
 
     with act_col2:
-        st.markdown("**B. Chạy Mô Phỏng Chu Trình Cập Nhật (Demo Mode)**")
-        st.caption("Cho phép bỏ qua ngưỡng 200 mẫu để thử nghiệm huấn luyện candidate và so sánh trên tập holdout.")
+        st.markdown("**B. Chạy Mô Phỏng Chu Trình Cập Nhật (Demo Mode — Dữ liệu mô phỏng)**")
+        st.caption("Minh họa quy trình huấn luyện candidate, đánh giá trên tập đối chiếu và quyết định thăng cấp.")
         if st.button("🚀 Chạy Mô Phỏng Candidate & So Sánh (Demo)", type="primary", use_container_width=True):
             with st.spinner("Đang huấn luyện candidate và tính toán so sánh trên tập comparison..."):
                 res_demo = run_retraining(
@@ -122,19 +139,35 @@ def render_model_management():
                 d_col1, d_col2 = st.columns(2)
                 with d_col1:
                     st.markdown(f"**Quyết định:** `{res_demo['decision']}`")
-                    st.write(res_demo["reason"])
+                    st.write(f"**Lý do:** {res_demo['reason']}")
                 with d_col2:
                     if res_demo.get("candidate_metrics") and res_demo.get("champion_metrics"):
                         champ = res_demo["champion_metrics"]
                         cand = res_demo["candidate_metrics"]
                         st.write(f"- Champion F1: **{champ['f1']:.4f}**")
-                        st.write(f"- Candidate F1: **{cand['f1']:.4f}** (Delta: {res_demo.get('delta_f1'):+.4f})")
-                        st.write(f"- Candidate Recall: **{cand['recall']:.4f}** (Delta: {res_demo.get('delta_recall'):+.4f})")
+                        st.write(f"- Candidate F1: **{cand['f1']:.4f}** (Delta: `{res_demo.get('delta_f1'):+.4f}`)")
+                        st.write(f"- Candidate Recall: **{cand['recall']:.4f}** (Delta: `{res_demo.get('delta_recall'):+.4f}`)")
 
     st.markdown("---")
 
-    # 4. Rollback and Model Versions
-    st.subheader("4. Lịch Sử Phiên Bản & Hoàn Tác (Rollback)")
+    # 4. Training Runs Audit History
+    st.subheader("4. Lịch Sử Các Đợt Huấn Luyện Lại (Candidate/Champion & Quyết Định)")
+    runs_df = get_training_runs(limit=20)
+    if not runs_df.empty:
+        st.dataframe(
+            runs_df[[
+                "run_id", "started_at", "status", "decision", "candidate_version",
+                "champion_version", "reason"
+            ]],
+            use_container_width=True,
+        )
+    else:
+        st.info("ℹ️ Chưa có lịch sử đợt retraining nào được ghi nhận trong cơ sở dữ liệu.")
+
+    st.markdown("---")
+
+    # 5. Rollback and Model Versions
+    st.subheader("5. Danh Sách Phiên Bản Mô Hình & Hoàn Tác (Rollback)")
 
     models_list = list_available_models()
     if models_list:
@@ -143,7 +176,7 @@ def render_model_management():
             rows.append({
                 "Phiên bản": m.get("model_version"),
                 "Kiến trúc": m.get("model_type"),
-                "Trạng thái": "🟢 Active" if m.get("is_active") else "Lưu trữ (Archived)",
+                "Trạng thái": "🟢 Active (Đang phục vụ)" if m.get("is_active") else "Lưu trữ (Archived)",
                 "Ngưỡng (Threshold)": m.get("threshold", 0.5),
                 "Thời điểm tạo": m.get("created_at_utc", "N/A")[:19].replace("T", " "),
             })
@@ -152,7 +185,10 @@ def render_model_management():
     # Rollback action
     rb_col1, rb_col2 = st.columns([2, 1])
     with rb_col1:
-        st.markdown("Trong trường hợp mô hình mới phát sinh sai lệch hoặc lỗi nghiệp vụ, quản trị viên có thể hoàn tác ngay lập tức về phiên bản đã kiểm chứng trước đó.")
+        st.markdown(
+            "Trong trường hợp mô hình mới phát sinh sai lệch hoặc lỗi nghiệp vụ, "
+            "quản trị viên có thể hoàn tác ngay lập tức về phiên bản đã kiểm chứng trước đó."
+        )
     with rb_col2:
         if st.button("⏪ Hoàn Tác Về Phiên Bản Trước (Rollback)", type="secondary", use_container_width=True):
             try:

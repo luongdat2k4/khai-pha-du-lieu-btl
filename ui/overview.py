@@ -50,11 +50,16 @@ def render_overview():
         st.markdown("""
         | Mức ưu tiên | Khoảng điểm Churn Score | Hành động can thiệp đề xuất |
         |---|---|---|
-        | 🟢 **Thấp (Low)** | `Score < 0.40` | Duy trì chăm sóc chuẩn; gửi khảo sát hài lòng định kỳ; không spam ưu đãi. |
-        | 🟡 **Trung bình (Medium)** | `0.40 ≤ Score < 0.70` | Gửi email thông báo ưu đãi gói data; tư vấn nâng cấp gói cước phù hợp; kiểm tra chất lượng kết nối. |
-        | 🔴 **Cao (High)** | `Score ≥ 0.70` | **Ưu tiên cao nhất**: Nhân viên chăm sóc gọi điện trực tiếp; áp dụng chính sách giảm cước hoặc tặng cước tháng. |
+        | 🟢 **Thấp (Low)** | `Score < 0.30` | Duy trì chăm sóc chuẩn; gửi khảo sát hài lòng định kỳ; không làm phiền bằng ưu đãi không cần thiết. |
+        | 🟡 **Trung bình (Medium)** | `0.30 ≤ Score < 0.60` | Gửi email chăm sóc, gợi ý tối ưu hóa gói cước data/thoại; kiểm tra chất lượng đường truyền. |
+        | 🔴 **Cao (High)** | `Score ≥ 0.60` | **Ưu tiên cao nhất**: Chuyên viên CSKH liên hệ trực tiếp; áp dụng chính sách chiết khấu cước hoặc tặng gói dịch vụ gia tăng. |
         """)
-        st.caption("Lưu ý: Ngưỡng quyết định nhãn rời bỏ chuẩn là `Threshold = 0.50`. Phân nhóm 3 mức trên nhằm phục vụ chiến lược can thiệp theo ngân sách.")
+        st.info(
+            "ℹ️ **Lưu ý quan trọng về cách phân loại (Plan 05 Section 2):**\n\n"
+            "- **Nhãn dự đoán rời bỏ:** Được xác định theo ngưỡng quyết định chuẩn `Threshold = 0.50` (Score ≥ 0.50 ➜ Churn = 'Yes').\n"
+            "- **Mức ưu tiên CSKH:** Các mốc `0.30` và `0.60` là **minh họa quy tắc nghiệp vụ** phân bổ tài nguyên và chi phí chăm sóc theo mức độ khẩn cấp, **không phải là ngưỡng đã được dữ liệu xác nhận**.\n"
+            "- Điểm số nguy cơ thể hiện mức độ cần can thiệp chăm sóc, không khẳng định chắc chắn khách hàng sẽ rời bỏ."
+        )
 
     with col_right:
         st.subheader("3. 19 Thuộc tính Đầu vào")

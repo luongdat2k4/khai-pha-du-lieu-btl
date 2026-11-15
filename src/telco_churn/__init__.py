@@ -44,8 +44,10 @@ from .storage import (
     init_db,
     save_prediction_batch,
     record_actual_label,
+    record_actual_labels_batch,
     get_prediction_history,
     get_snapshots_with_labels,
+    get_training_runs,
     get_db_connection,
 )
 
@@ -91,8 +93,10 @@ __all__ = [
     "init_db",
     "save_prediction_batch",
     "record_actual_label",
+    "record_actual_labels_batch",
     "get_prediction_history",
     "get_snapshots_with_labels",
+    "get_training_runs",
     "get_db_connection",
     # Registry
     "get_active_model_info",

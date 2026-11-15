@@ -439,6 +439,9 @@ def get_prediction_history(
     limit: int = 100,
     customer_id: Optional[str] = None,
     model_version: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     has_label: Optional[bool] = None,
     db_path: Optional[str] = None,
 ) -> pd.DataFrame:
@@ -487,6 +490,18 @@ def get_prediction_history(
         query += " AND p.model_version = ?"
         params.append(model_version)
 
+    if batch_id:
+        query += " AND p.batch_id LIKE ?"
+        params.append(f"%{batch_id}%")
+
+    if start_date:
+        query += " AND p.predicted_at >= ?"
+        params.append(start_date)
+
+    if end_date:
+        query += " AND p.predicted_at <= ?"
+        params.append(end_date)
+
     if has_label is True:
         query += " AND ll.actual_churn IS NOT NULL"
     elif has_label is False:
@@ -496,6 +511,146 @@ def get_prediction_history(
     params.append(limit)
 
     df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+
+def record_actual_labels_batch(
+    records: Union[pd.DataFrame, List[Dict[str, Any]]],
+    default_source: str = "CSV Upload",
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate and record a batch of actual churn labels conforming to Plan 05 Section 4.
+
+    Validates:
+        - Presence of snapshot_id and actual_churn columns
+        - Existence of snapshot_id in customer_snapshots
+        - Duplicate keys within the batch
+        - Valid label values (0/1 or No/Yes)
+    """
+    df = pd.DataFrame(records) if not isinstance(records, pd.DataFrame) else records.copy()
+
+    if df.empty:
+        return {"total": 0, "success_count": 0, "failed_count": 0, "errors": []}
+
+    # Normalize column names
+    col_map = {}
+    for c in df.columns:
+        cl = str(c).strip().lower()
+        if cl in ["snapshot_id", "snapshotid", "id"]:
+            col_map[c] = "snapshot_id"
+        elif cl in ["actual_churn", "actual_label", "churn", "label"]:
+            col_map[c] = "actual_churn"
+        elif cl in ["observed_at", "label_observed_at", "date"]:
+            col_map[c] = "observed_at"
+        elif cl in ["source", "label_source"]:
+            col_map[c] = "source"
+        elif cl in ["note", "notes", "comment"]:
+            col_map[c] = "note"
+
+    df = df.rename(columns=col_map)
+
+    if "snapshot_id" not in df.columns or "actual_churn" not in df.columns:
+        raise ValueError("Tệp CSV bắt buộc phải có ít nhất hai cột: 'snapshot_id' và 'actual_churn'")
+
+    errors: List[Dict[str, Any]] = []
+    success_events: List[Dict[str, Any]] = []
+    seen_snapshots = set()
+
+    now_utc = datetime.now(timezone.utc).isoformat()
+
+    for idx, row in df.iterrows():
+        row_num = idx + 1
+        snap_id = str(row.get("snapshot_id", "")).strip()
+        raw_label = row.get("actual_churn")
+
+        if not snap_id or snap_id.lower() == "nan":
+            errors.append({"row": row_num, "snapshot_id": snap_id, "reason": "Thiếu mã snapshot_id"})
+            continue
+
+        if snap_id in seen_snapshots:
+            errors.append({"row": row_num, "snapshot_id": snap_id, "reason": "Mã snapshot_id bị trùng lặp trong cùng tệp"})
+            continue
+        seen_snapshots.add(snap_id)
+
+        # Check label value
+        try:
+            if isinstance(raw_label, (int, float, np.integer, np.floating)) and not pd.isna(raw_label):
+                churn_val = int(raw_label)
+                if churn_val not in [0, 1]:
+                    raise ValueError()
+            else:
+                lbl_str = str(raw_label).strip().lower()
+                if lbl_str in ["yes", "1", "true"]:
+                    churn_val = 1
+                elif lbl_str in ["no", "0", "false"]:
+                    churn_val = 0
+                else:
+                    raise ValueError()
+        except Exception:
+            errors.append({
+                "row": row_num,
+                "snapshot_id": snap_id,
+                "reason": f"Giá trị nhãn không hợp lệ: '{raw_label}'. Chỉ chấp nhận 0/1 hoặc No/Yes.",
+            })
+            continue
+
+        obs_at = row.get("observed_at")
+        if not obs_at or pd.isna(obs_at) or str(obs_at).strip() == "":
+            obs_at = now_utc
+        else:
+            obs_at = str(obs_at).strip()
+
+        src = row.get("source")
+        if not src or pd.isna(src) or str(src).strip() == "":
+            src = default_source
+        else:
+            src = str(src).strip()
+
+        note_val = row.get("note")
+        note = str(note_val).strip() if (note_val and not pd.isna(note_val)) else None
+
+        try:
+            evt = record_actual_label(
+                snapshot_id=snap_id,
+                label=churn_val,
+                observed_at=obs_at,
+                source=src,
+                note=note,
+                db_path=db_path,
+            )
+            success_events.append(evt)
+        except Exception as e:
+            errors.append({"row": row_num, "snapshot_id": snap_id, "reason": str(e)})
+
+    return {
+        "total": len(df),
+        "success_count": len(success_events),
+        "failed_count": len(errors),
+        "success_events": success_events,
+        "errors": errors,
+    }
+
+
+def get_training_runs(limit: int = 50, db_path: Optional[str] = None) -> pd.DataFrame:
+    """Retrieve history of retraining runs, decisions, candidate/champion versions, and reasons."""
+    conn = get_db_connection(db_path)
+    query = """
+    SELECT
+        run_id,
+        as_of,
+        champion_version,
+        candidate_version,
+        status,
+        decision,
+        reason,
+        started_at,
+        finished_at
+    FROM training_runs
+    ORDER BY started_at DESC
+    LIMIT ?
+    """
+    df = pd.read_sql_query(query, conn, params=[limit])
     conn.close()
     return df
 

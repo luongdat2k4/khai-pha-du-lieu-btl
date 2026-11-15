@@ -13,6 +13,7 @@ from ui.batch_prediction import render_batch_prediction
 from ui.history import render_history
 from ui.model_results import render_model_results
 from ui.model_management import render_model_management
+from ui.extended_analysis import render_extended_analysis
 
 # Page configuration
 st.set_page_config(
@@ -53,6 +54,7 @@ def main():
         "📜 Lịch sử & Nhãn thực tế",
         "📈 Kết quả & Đánh giá mô hình",
         "⚙️ Quản lý & Retraining",
+        "🔬 Phân tích mở rộng (P2)",
     ]
 
     choice = st.sidebar.radio(
@@ -67,7 +69,8 @@ def main():
         "**Dữ liệu:** IBM Telco Churn (7.043 mẫu)\n\n"
         "**Mô hình Active:** Logistic Regression (Champion)\n\n"
         "**Bộ nhớ đệm:** SQLite Runtime DB\n\n"
-        "**Ngưỡng quyết định:** 0.50"
+        "**Ngưỡng quyết định:** 0.50\n\n"
+        "**Mức ưu tiên:** Thấp (<0.3) | TB (0.3–0.6) | Cao (≥0.6)"
     )
 
     st.sidebar.markdown("---")
@@ -86,6 +89,8 @@ def main():
         render_model_results()
     elif choice == "⚙️ Quản lý & Retraining":
         render_model_management()
+    elif choice == "🔬 Phân tích mở rộng (P2)":
+        render_extended_analysis()
 
 
 if __name__ == "__main__":

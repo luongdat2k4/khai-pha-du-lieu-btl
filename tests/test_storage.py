@@ -14,6 +14,7 @@ from telco_churn.storage import (
     init_db,
     save_prediction_batch,
     record_actual_label,
+    record_actual_labels_batch,
     get_prediction_history,
     get_snapshots_with_labels,
     get_db_connection,
@@ -169,3 +170,35 @@ def test_record_actual_label_invalid_snapshot(temp_db):
             source="crm",
             db_path=temp_db,
         )
+
+
+def test_record_actual_labels_batch(temp_db, sample_valid_df):
+    bundle = load_model_bundle()
+    preds = predict_records(sample_valid_df.iloc[:3], bundle)
+
+    save_res = save_prediction_batch(
+        inputs=sample_valid_df.iloc[:3],
+        outputs=preds,
+        source="batch_test",
+        db_path=temp_db,
+    )
+    snaps = save_res["snapshot_ids"]
+
+    # Valid batch update
+    batch_df = pd.DataFrame([
+        {"snapshot_id": snaps[0], "actual_churn": "Yes", "source": "call_center"},
+        {"snapshot_id": snaps[1], "actual_churn": 0, "source": "billing_system"},
+        {"snapshot_id": "invalid_snap_123", "actual_churn": "No"},  # Should be recorded as error
+    ])
+
+    batch_res = record_actual_labels_batch(batch_df, default_source="bulk_import", db_path=temp_db)
+    assert batch_res["total"] == 3
+    assert batch_res["success_count"] == 2
+    assert batch_res["failed_count"] == 1
+    assert len(batch_res["errors"]) == 1
+    assert "does not exist" in batch_res["errors"][0]["reason"]
+
+    # Verify history
+    hist = get_prediction_history(has_label=True, db_path=temp_db)
+    assert len(hist) == 2
+

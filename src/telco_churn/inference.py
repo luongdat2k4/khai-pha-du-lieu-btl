@@ -81,17 +81,17 @@ def load_model_bundle(
     }
 
 
-def compute_priority_level(score: float) -> str:
+def compute_priority_level(score: float, low_threshold: float = 0.30, high_threshold: float = 0.60) -> str:
     """Determine customer intervention priority level based on estimated churn risk.
 
-    Policy:
-        - Score < 0.40: 'Thấp' (Low risk - standard retention)
-        - 0.40 <= Score < 0.70: 'Trung bình' (Medium risk - automated email / loyalty check)
-        - Score >= 0.70: 'Cao' (High risk - urgent personal outreach / promo offer)
+    Policy (Conforming to Plan 05 Section 2):
+        - Score < 0.30: 'Thấp' (Low risk - standard retention)
+        - 0.30 <= Score < 0.60: 'Trung bình' (Medium risk - automated email / loyalty check)
+        - Score >= 0.60: 'Cao' (High risk - urgent personal outreach / promo offer)
     """
-    if score >= 0.70:
+    if score >= high_threshold:
         return "Cao"
-    elif score >= 0.40:
+    elif score >= low_threshold:
         return "Trung bình"
     else:
         return "Thấp"
