@@ -40,7 +40,7 @@ def build_preprocessor(
                 ("scaler", StandardScaler()),
             ]
         )
-    elif norm_kind in ["tree", "decision_tree", "dt", "forest", "random_forest", "rf"]:
+    elif norm_kind in ["tree", "decision_tree", "dt", "forest", "random_forest", "rf", "dummy", "baseline"]:
         numeric_transformer = Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="median")),
