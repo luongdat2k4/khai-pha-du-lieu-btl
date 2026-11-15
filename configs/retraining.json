@@ -1,0 +1,27 @@
+{
+  "gate": {
+    "min_new_snapshots": 200,
+    "min_pos_labels": 30,
+    "min_neg_labels": 30,
+    "require_both_classes": true,
+    "comparison_ratio": 0.25,
+    "allow_synthetic": false
+  },
+  "promotion_policy": {
+    "min_f1_gain": 0.01,
+    "max_recall_drop": 0.02,
+    "threshold": 0.5
+  },
+  "training": {
+    "random_state": 42,
+    "use_base_dev_data": true,
+    "manifest_path": "data/splits/split_manifest.csv",
+    "raw_data_path": "telco-customer-churn-on-icp4d/data/Telco-Customer-Churn.csv"
+  },
+  "paths": {
+    "db_path": "data/runtime/churn.db",
+    "artifacts_dir": "artifacts",
+    "snapshots_dir": "data/snapshots",
+    "reports_dir": "reports"
+  }
+}

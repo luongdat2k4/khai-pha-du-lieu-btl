@@ -4,7 +4,7 @@ import os
 import time
 import platform
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -365,3 +365,70 @@ def get_environment_metadata() -> Dict[str, Any]:
         "joblib_version": joblib.__version__,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def train_experiment(
+    config: Dict[str, Any],
+    manifest: Union[pd.DataFrame, str],
+    raw_df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Execute complete cross-validation training and model selection experiment.
+
+    Contract conforming to Plan 04 Section 3:
+    train_experiment(config, manifest) -> run_id, logs, model bundle, CV summary.
+    """
+    from .schema import validate_records
+    from .data import load_raw_data
+
+    run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    logs: List[str] = []
+
+    # 1. Resolve manifest
+    if isinstance(manifest, str):
+        manifest_df = pd.read_csv(manifest)
+    else:
+        manifest_df = manifest.copy()
+
+    # 2. Resolve raw data
+    if raw_df is None:
+        raw_path = config.get("data_raw_path", "telco-customer-churn-on-icp4d/data/Telco-Customer-Churn.csv")
+        raw_df = load_raw_data(raw_path)
+
+    valid_df, _ = validate_records(raw_df, mode="training")
+    dev_manifest = manifest_df[manifest_df["split"] == "dev"][["customerID", "fold"]]
+    dev_df = valid_df.merge(dev_manifest, on="customerID")
+
+    X_dev = dev_df[ALL_FEATURE_COLUMNS]
+    y_dev = dev_df[TARGET_COLUMN]
+    folds = dev_df["fold"].astype(int).values
+
+    logs.append(f"Loaded {len(dev_df)} development samples across {len(np.unique(folds))} CV folds.")
+
+    # 3. Baseline
+    cv_summary: Dict[str, Any] = {}
+    baseline_res = evaluate_baseline(X_dev, y_dev, folds)
+    cv_summary["dummy"] = baseline_res
+    logs.append(f"Baseline mean F1: {baseline_res['mean_f1']:.4f}")
+
+    # 4. Search over models
+    models_to_run = config.get("training", {}).get("models", ["decision_tree", "logistic_regression", "random_forest"])
+    for m in models_to_run:
+        res = run_grid_search(m, X_dev, y_dev, folds)
+        cv_summary[m] = res
+        logs.append(f"Model '{m}' mean F1: {res['mean_f1']:.4f}")
+
+    # 5. Champion selection
+    champion_name, rationale = select_champion_model(cv_summary)
+    champion_bundle = cv_summary[champion_name]
+    logs.append(f"Selected champion: {champion_name}. Rationale: {rationale}")
+
+    return {
+        "run_id": run_id,
+        "logs": logs,
+        "champion_name": champion_name,
+        "rationale": rationale,
+        "model_bundle": champion_bundle,
+        "cv_summary": cv_summary,
+        "environment": get_environment_metadata(),
+    }
+
