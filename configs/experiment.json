@@ -1,0 +1,52 @@
+{
+  "project_name": "telco_customer_churn",
+  "data_raw_path": "telco-customer-churn-on-icp4d/data/Telco-Customer-Churn.csv",
+  "expected_sha256": "88be4b93fbe0cc83421af1c503794c97c342eca914c1576db7c276e61d61358a",
+  "schema_version": "1.0",
+  "cleaning_rule_version": "v1",
+  "split": {
+    "test_size": 0.2,
+    "stratify_column": "Churn",
+    "random_state": 42,
+    "n_splits": 5,
+    "manifest_path": "data/splits/split_manifest.csv"
+  },
+  "features": {
+    "id_column": "customerID",
+    "target_column": "Churn",
+    "numeric_features": [
+      "tenure",
+      "MonthlyCharges",
+      "TotalCharges"
+    ],
+    "categorical_features": [
+      "gender",
+      "SeniorCitizen",
+      "Partner",
+      "Dependents",
+      "PhoneService",
+      "MultipleLines",
+      "InternetService",
+      "OnlineSecurity",
+      "OnlineBackup",
+      "DeviceProtection",
+      "TechSupport",
+      "StreamingTV",
+      "StreamingMovies",
+      "Contract",
+      "PaperlessBilling",
+      "PaymentMethod"
+    ]
+  },
+  "training": {
+    "metrics": ["accuracy", "precision", "recall", "f1", "roc_auc"],
+    "primary_metric": "f1",
+    "models": ["decision_tree", "logistic_regression", "random_forest"]
+  },
+  "output_dirs": {
+    "reports_dir": "reports",
+    "eda_figures_dir": "reports/figures/eda",
+    "eval_figures_dir": "reports/figures/evaluation",
+    "artifacts_dir": "artifacts/models"
+  }
+}

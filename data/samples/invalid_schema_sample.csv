@@ -1,0 +1,6 @@
+customerID,gender,SeniorCitizen,Partner,Dependents,tenure,PhoneService,MultipleLines,InternetService,OnlineSecurity,OnlineBackup,DeviceProtection,TechSupport,StreamingTV,StreamingMovies,Contract,PaperlessBilling,PaymentMethod,MonthlyCharges,TotalCharges
+ERR-01,Robot,0,Yes,No,12,Yes,No,DSL,No,Yes,No,No,No,No,Month-to-month,Yes,Electronic check,29.85,350.00
+ERR-02,Male,0,No,No,-5,Yes,No,DSL,Yes,No,Yes,No,No,No,One year,No,Mailed check,56.95,200.00
+ERR-03,Female,0,No,No,10,No,Yes,DSL,Yes,No,No,No,No,No,Month-to-month,No,Mailed check,29.75,300.00
+ERR-04,Male,0,No,No,24,Yes,No,No,Yes,No,No,No,No,No,Two year,No,Credit card (automatic),20.00,480.00
+ERR-05,Female,0,Yes,No,5,Yes,No,Fiber optic,No,No,No,No,No,No,Forever,Yes,Electronic check,-70.00,350.00

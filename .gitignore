@@ -1,3 +1,43 @@
-cuop/
-telco-customer-churn-on-icp4d/
-doc-tmp/
+# Reference projects and temporary documents
+/cuop/
+/telco-customer-churn-on-icp4d/
+/doc-tmp/
+
+# Python environments and generated files
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Tool and notebook caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local secrets (keep example configuration files)
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Runtime data and generated model artifacts
+/data/runtime/
+/data/snapshots/
+/artifacts/
+*.log
+
+# Editor, operating system, and Office temporary files
+.idea/
+.vs/
+.DS_Store
+Thumbs.db
+Desktop.ini
+~$*
+*.tmp
+*.swp
