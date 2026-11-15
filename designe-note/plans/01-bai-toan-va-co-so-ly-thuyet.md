@@ -112,9 +112,9 @@ Holdout là tập kiểm tra độc lập cuối cùng. CV là cách so sánh/l�
 
 ## 7. Checklist hoàn thành
 
-- [ ] Có định nghĩa nhãn, 19 đầu vào, đầu ra, người dùng và giới hạn.
-- [ ] Có sơ đồ KDD gắn với file kết quả dự kiến.
-- [ ] Có công thức đúng, ví dụ Gini tính tay và phân biệt CART với C4.5.
-- [ ] Có lý do chọn ba mô hình và giải thích lớp dương.
-- [ ] Phân biệt kiến thức trong giáo trình và phần bổ sung.
-- [ ] Mỗi thành viên giải thích được vì sao không chọn theo accuracy và không dùng test để tuning.
+- [x] Có định nghĩa nhãn, 19 đầu vào, đầu ra, người dùng và giới hạn (chi tiết tại `docs/problem-definition.md`).
+- [x] Có sơ đồ KDD gắn với file kết quả dự kiến (bảng đối chiếu 8 bước tại `docs/problem-definition.md`).
+- [x] Có công thức đúng, ví dụ Gini tính tay và phân biệt CART với C4.5 (chi tiết tại `docs/theory.md` và `deliverables/report/chuong-02-co-so-ly-thuyet.md`).
+- [x] Có lý do chọn ba mô hình và giải thích lớp dương (chi tiết tại `docs/theory.md`).
+- [x] Phân biệt kiến thức trong giáo trình và phần bổ sung (bản đồ lý thuyết đối chiếu tại `docs/theory.md`).
+- [x] Mỗi thành viên giải thích được vì sao không chọn theo accuracy và không dùng test để tuning (phân tích chi tiết tại `docs/theory.md`).
