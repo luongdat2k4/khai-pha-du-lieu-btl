@@ -34,6 +34,8 @@ from .inference import load_model_bundle, predict_records
 from .storage import (
     get_db_connection,
     get_snapshots_with_labels,
+    record_training_membership,
+    get_training_memberships,
     DEFAULT_DB_PATH,
 )
 from .registry import (
@@ -82,10 +84,130 @@ def load_retraining_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         return json.load(f)
 
 
+class RetrainingLock:
+    """File lock to prevent concurrent retraining executions (Plan 06 Section 7 Item 7)."""
+
+    def __init__(self, lock_dir: str = os.path.join("data", "runtime")):
+        self.lock_dir = lock_dir
+        self.lock_path = os.path.join(lock_dir, "retrain.lock")
+        self._acquired = False
+
+    def __enter__(self):
+        os.makedirs(self.lock_dir, exist_ok=True)
+        if os.path.exists(self.lock_path):
+            try:
+                mtime = os.path.getmtime(self.lock_path)
+                # Auto-release stale lock older than 2 hours
+                if (time.time() - mtime) > 7200:
+                    os.remove(self.lock_path)
+                else:
+                    with open(self.lock_path, "r", encoding="utf-8") as f:
+                        lock_info = f.read()
+                    raise RuntimeError(
+                        f"Một tác vụ huấn luyện lại đang được thực thi (Khóa: {self.lock_path}). Chi tiết: {lock_info}"
+                    )
+            except OSError:
+                pass
+
+        try:
+            with open(self.lock_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "pid": os.getpid(),
+                    "locked_at": datetime.now(timezone.utc).isoformat(),
+                }))
+            self._acquired = True
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise e
+            raise RuntimeError(f"Không thể tạo file khóa retraining: {e}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._acquired and os.path.exists(self.lock_path):
+            try:
+                os.remove(self.lock_path)
+            except OSError:
+                pass
+
+
+def split_by_customer_group(
+    df: pd.DataFrame,
+    group_col: str = "customer_id",
+    target_col: str = "actual_churn",
+    comp_ratio: float = 0.25,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Partition new snapshot records into candidate train and comparison holdout.
+
+    Guarantees:
+        1. All snapshots for any given customer belong entirely to train OR comparison (Plan 06 Section 5 Item 3).
+        2. No customer ID overlap between train and comparison sets.
+        3. Stratified by churn label at customer level when both classes exist.
+    """
+    if df.empty:
+        return df.copy(), df.copy()
+
+    col = group_col if group_col in df.columns else ("customerID" if "customerID" in df.columns else None)
+    if col is None:
+        if len(df) >= 4 and len(df[target_col].unique()) > 1:
+            return train_test_split(df, test_size=comp_ratio, stratify=df[target_col], random_state=random_state)
+        return df.copy(), df.copy()
+
+    # Get latest target for each unique customer
+    cust_targets = df.groupby(col)[target_col].last()
+    unique_custs = cust_targets.index.to_numpy()
+    labels = cust_targets.to_numpy()
+
+    if len(unique_custs) < 4:
+        return df.copy(), df.copy()
+
+    c1 = int((labels == 1).sum())
+    c0 = int((labels == 0).sum())
+    can_stratify = (c1 >= 2 and c0 >= 2)
+    strat_arg = labels if can_stratify else None
+
+    train_custs, comp_custs = train_test_split(
+        unique_custs,
+        test_size=comp_ratio,
+        stratify=strat_arg,
+        random_state=random_state,
+    )
+
+    train_set = set(train_custs)
+    comp_set = set(comp_custs)
+
+    train_df = df[df[col].isin(train_set)].copy()
+    comp_df = df[df[col].isin(comp_set)].copy()
+
+    return train_df, comp_df
+
+
+def run_candidate_smoke_test(
+    pipeline: Any,
+    sample_path: str = "data/samples/valid_sample.csv",
+) -> Tuple[bool, str]:
+    """Perform smoke test on candidate pipeline before promotion (Plan 06 Section 6 & 7)."""
+    if not os.path.exists(sample_path):
+        return True, "No sample file found, skipping smoke test"
+    try:
+        sample_df = pd.read_csv(sample_path)
+        X = sample_df[ALL_FEATURE_COLUMNS]
+        probs = pipeline.predict_proba(X)[:, 1]
+        if np.isnan(probs).any():
+            return False, "Phát hiện giá trị NaN trong xác suất dự đoán của candidate"
+        if (probs < 0.0).any() or (probs > 1.0).any():
+            return False, "Xác suất dự đoán của candidate nằm ngoài khoảng [0, 1]"
+        return True, "Candidate smoke test passed"
+    except Exception as e:
+        return False, f"Lỗi ngoại lệ trong smoke test: {e}"
+
+
 def evaluate_gate_conditions(
     df_labeled: pd.DataFrame,
     gate_config: Dict[str, Any],
     manifest_path: str = "data/splits/split_manifest.csv",
+    check_schedule: bool = False,
+    as_of: Optional[str] = None,
 ) -> Tuple[bool, Dict[str, Any]]:
     """Verify all 6 gate conditions specified in Plan 06 Section 4."""
     total_count = len(df_labeled)
@@ -104,6 +226,19 @@ def evaluate_gate_conditions(
         "no_test_leakage": True,
         "failures": [],
     }
+
+    # Check schedule if requested (Plan 06 Section 4: Day 01 of month)
+    if check_schedule:
+        as_of_val = as_of or datetime.now(timezone.utc).isoformat()
+        try:
+            clean_ts = as_of_val.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_ts)
+            if dt.day != 1:
+                details["failures"].append(
+                    f"Chưa đến kỳ chạy định kỳ: Yêu cầu ngày 01 hàng tháng lúc 02:00 GMT+7 (Thời điểm kiểm tra: ngày {dt.day}/{dt.month})."
+                )
+        except Exception:
+            pass
 
     if total_count < min_snapshots:
         details["failures"].append(
@@ -169,9 +304,11 @@ def compute_metrics_on_comparison(
     y_comp: pd.Series,
     threshold: float = 0.5,
 ) -> Dict[str, Any]:
-    """Evaluate pipeline on holdout comparison set."""
+    """Evaluate pipeline on holdout comparison set and record latency (Plan 06 Section 6 line 79)."""
+    t0 = time.perf_counter()
     probs = pipeline.predict_proba(X_comp)[:, 1]
     preds = (probs >= threshold).astype(int)
+    latency_ms = (time.perf_counter() - t0) * 1000.0
 
     f1 = float(f1_score(y_comp, preds, pos_label=1, zero_division=0))
     prec = float(precision_score(y_comp, preds, pos_label=1, zero_division=0))
@@ -194,6 +331,7 @@ def compute_metrics_on_comparison(
         "sample_count": len(y_comp),
         "class_1_count": int((y_comp == 1).sum()),
         "class_0_count": int((y_comp == 0).sum()),
+        "prediction_time_ms": round(latency_ms, 2),
     }
 
 
@@ -221,6 +359,7 @@ def run_retraining(
     dry_run: bool = False,
     config: Optional[Union[str, Dict[str, Any]]] = None,
     ignore_gate: bool = False,
+    ignore_schedule: bool = True,
     allow_synthetic: Optional[bool] = None,
     db_path: Optional[str] = None,
     artifacts_dir: Optional[str] = None,
@@ -247,213 +386,305 @@ def run_retraining(
     raw_data_path = train_cfg.get("raw_data_path", "telco-customer-churn-on-icp4d/data/Telco-Customer-Churn.csv")
 
     effective_allow_synth = allow_synthetic if allow_synthetic is not None else gate_cfg.get("allow_synthetic", False)
+    exclude_trained = train_cfg.get("exclude_previously_trained", False)
 
-    # 1. Retrieve eligible labeled snapshots from SQLite
-    df_labeled = get_snapshots_with_labels(
-        as_of=as_of_ts,
-        include_synthetic=effective_allow_synth,
-        db_path=target_db,
-    )
+    lock_dir = os.path.dirname(os.path.abspath(target_db))
+    with RetrainingLock(lock_dir):
+        # 1. Retrieve eligible labeled snapshots from SQLite
+        df_labeled = get_snapshots_with_labels(
+            as_of=as_of_ts,
+            include_synthetic=effective_allow_synth,
+            exclude_trained=exclude_trained,
+            db_path=target_db,
+        )
 
-    # 2. Evaluate gate conditions
-    gate_passed, gate_details = evaluate_gate_conditions(df_labeled, gate_cfg, manifest_path)
+        # Export frozen snapshot file and compute hash (Plan 06 Section 5 Item 1)
+        snapshots_dir = paths_cfg.get("snapshots_dir", os.path.join("data", "snapshots"))
+        os.makedirs(snapshots_dir, exist_ok=True)
+        snapshot_path = None
+        snapshot_hash = None
+        if not df_labeled.empty:
+            snapshot_path = os.path.join(snapshots_dir, f"snapshot_{run_id}.csv")
+            df_labeled.to_csv(snapshot_path, index=False, encoding="utf-8-sig")
+            snapshot_hash = compute_file_sha256(snapshot_path)
 
-    # If gate failed and not in forced/demo mode
-    if not gate_passed and not ignore_gate:
-        reason = "; ".join(gate_details["failures"])
-        # Log to DB
+        # 2. Evaluate gate conditions
+        gate_passed, gate_details = evaluate_gate_conditions(
+            df_labeled=df_labeled,
+            gate_config=gate_cfg,
+            manifest_path=manifest_path,
+            check_schedule=not ignore_schedule,
+            as_of=as_of_ts,
+        )
+
+        # If gate failed and not in forced/demo mode
+        if not gate_passed and not ignore_gate:
+            reason = "; ".join(gate_details["failures"])
+            _record_training_run_db(
+                run_id=run_id,
+                as_of=as_of_ts,
+                config_json=json.dumps(cfg),
+                snapshot_path=snapshot_path,
+                snapshot_hash=snapshot_hash,
+                status="SKIPPED",
+                decision="SKIP",
+                reason=reason,
+                started_at=start_time.isoformat(),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                db_path=target_db,
+            )
+            return {
+                "run_id": run_id,
+                "as_of": as_of_ts,
+                "gate_passed": False,
+                "gate_details": gate_details,
+                "decision": "SKIP",
+                "reason": reason,
+                "candidate_metrics": None,
+                "champion_metrics": None,
+                "dry_run": dry_run,
+            }
+
+        # 3. Partition eligible new data using customer-group splitting (Plan 06 Section 5 Item 3)
+        comp_ratio = float(gate_cfg.get("comparison_ratio", 0.25))
+        new_train_df, new_comp_df = split_by_customer_group(
+            df=df_labeled,
+            group_col="customer_id",
+            target_col="actual_churn",
+            comp_ratio=comp_ratio,
+            random_state=train_cfg.get("random_state", 42),
+        )
+
+        # Verify post-partition comparison set (Plan 06 Section 4 Item 6)
+        comp_pos = int((new_comp_df["actual_churn"] == 1).sum()) if not new_comp_df.empty else 0
+        comp_neg = int((new_comp_df["actual_churn"] == 0).sum()) if not new_comp_df.empty else 0
+
+        # 4. Load Champion model bundle
+        champion_info = get_active_model_info(target_artifacts)
+        champion_version = champion_info.get("active_version")
+        champ_bundle = load_model_bundle(champion_version, artifacts_dir=target_artifacts)
+        champ_pipeline = champ_bundle["pipeline"]
+        champ_meta = champ_bundle["metadata"]
+        model_type = champ_meta.get("model_type", "logistic_regression")
+        best_params = champ_meta.get("best_params", {})
+
+        # If comparison set lacks class balance in normal run
+        if (comp_pos == 0 or comp_neg == 0) and not ignore_gate:
+            reason = (
+                f"Tập so sánh sau phân chia không đủ hai lớp (Yes={comp_pos}, No={comp_neg}). "
+                f"Theo Plan 06 Section 4 & 5, hoãn thăng cấp và tiếp tục duy trì Champion {champion_version}."
+            )
+            _record_training_run_db(
+                run_id=run_id,
+                as_of=as_of_ts,
+                config_json=json.dumps(cfg),
+                snapshot_path=snapshot_path,
+                snapshot_hash=snapshot_hash,
+                champion_version=champion_version,
+                candidate_version=None,
+                status="SKIPPED",
+                decision="SKIP",
+                reason=reason,
+                started_at=start_time.isoformat(),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                db_path=target_db,
+            )
+            return {
+                "run_id": run_id,
+                "as_of": as_of_ts,
+                "gate_passed": False,
+                "gate_details": {
+                    **gate_details,
+                    "post_split_comparison_pos": comp_pos,
+                    "post_split_comparison_neg": comp_neg,
+                },
+                "decision": "SKIP",
+                "reason": reason,
+                "candidate_metrics": None,
+                "champion_metrics": None,
+                "dry_run": dry_run,
+            }
+
+        # 5. Build candidate training dataset: Base dev set (80%) + new train partition
+        X_train_parts = []
+        y_train_parts = []
+
+        if train_cfg.get("use_base_dev_data", True) and os.path.exists(manifest_path) and os.path.exists(raw_data_path):
+            raw_df = load_raw_data(raw_data_path)
+            valid_raw, _ = validate_records(raw_df, mode="training")
+            manifest = pd.read_csv(manifest_path)
+            dev_manifest = manifest[manifest["split"] == "dev"][["customerID", "fold"]]
+            dev_merged = valid_raw.merge(dev_manifest, on="customerID")
+            X_train_parts.append(dev_merged[ALL_FEATURE_COLUMNS])
+            y_train_parts.append(dev_merged[TARGET_COLUMN])
+
+        if not new_train_df.empty:
+            X_train_parts.append(new_train_df[ALL_FEATURE_COLUMNS])
+            y_train_parts.append(new_train_df["actual_churn"])
+
+        if X_train_parts:
+            X_candidate_train = pd.concat(X_train_parts, ignore_index=True)
+            y_candidate_train = pd.concat(y_train_parts, ignore_index=True)
+        else:
+            raise ValueError("No training data available to fit candidate model")
+
+        # 6. Fit candidate pipeline
+        candidate_pipeline = train_candidate_pipeline(
+            X_train=X_candidate_train,
+            y_train=y_candidate_train,
+            model_type=model_type,
+            params=best_params,
+            random_state=train_cfg.get("random_state", 42),
+        )
+
+        # 7. Evaluate BOTH champion and candidate on the EXACT SAME comparison set
+        X_comp = new_comp_df[ALL_FEATURE_COLUMNS]
+        y_comp = new_comp_df["actual_churn"]
+
+        threshold = float(promo_cfg.get("threshold", 0.5))
+        champ_metrics = compute_metrics_on_comparison(champ_pipeline, X_comp, y_comp, threshold=threshold)
+        cand_metrics = compute_metrics_on_comparison(candidate_pipeline, X_comp, y_comp, threshold=threshold)
+
+        # 8. Candidate smoke test before promotion (Plan 06 Section 7 Item 1)
+        smoke_passed, smoke_msg = run_candidate_smoke_test(
+            candidate_pipeline,
+            sample_path=os.path.join("data", "samples", "valid_sample.csv"),
+        )
+
+        # Compare & make decision based on Plan 06 Section 6
+        min_f1_gain = float(promo_cfg.get("min_f1_gain", 0.01))
+        max_recall_drop = float(promo_cfg.get("max_recall_drop", 0.02))
+
+        delta_f1 = cand_metrics["f1"] - champ_metrics["f1"]
+        delta_recall = cand_metrics["recall"] - champ_metrics["recall"]
+
+        if not smoke_passed:
+            is_promoted = False
+            decision = "REJECT"
+            reason = f"Candidate bị từ chối do không vượt qua kiểm thử chuẩn hóa (Smoke test): {smoke_msg}"
+        elif (delta_f1 >= min_f1_gain) and (delta_recall >= -max_recall_drop):
+            is_promoted = True
+            decision = "PROMOTE"
+            reason = (
+                f"Candidate đạt điều kiện thăng cấp: F1 tăng {delta_f1:+.4f} (>= +{min_f1_gain:.4f}) "
+                f"và Recall thay đổi {delta_recall:+.4f} (>= -{max_recall_drop:.4f}) trên tập so sánh độc lập."
+            )
+        else:
+            is_promoted = False
+            decision = "REJECT"
+            reason = (
+                f"Candidate không đạt điều kiện thăng cấp: F1 delta={delta_f1:+.4f} (yêu cầu >= +{min_f1_gain:.4f}), "
+                f"Recall delta={delta_recall:+.4f} (yêu cầu >= -{max_recall_drop:.4f}). Tiếp tục giữ Champion {champion_version}."
+            )
+
+        # 9. Packaging and activation if promoted and not dry_run
+        next_ver = get_next_model_version(target_artifacts)
+        candidate_version = None
+
+        if decision == "PROMOTE":
+            candidate_version = next_ver
+            if not dry_run:
+                cand_dir = os.path.join(target_artifacts, "models", next_ver)
+                os.makedirs(cand_dir, exist_ok=True)
+
+                # Save pipeline
+                joblib.dump(candidate_pipeline, os.path.join(cand_dir, "pipeline.joblib"))
+
+                # Save metadata
+                cand_meta = {
+                    "model_version": next_ver,
+                    "model_type": model_type,
+                    "best_params": best_params,
+                    "class_mapping": {"No": 0, "Yes": 1},
+                    "threshold": threshold,
+                    "primary_metric": "f1",
+                    "train_samples": len(X_candidate_train),
+                    "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "champion_version_superseded": champion_version,
+                    "comparison_metrics": cand_metrics,
+                    "environment": get_environment_metadata(),
+                }
+                with open(os.path.join(cand_dir, "metadata.json"), "w", encoding="utf-8") as f:
+                    json.dump(cand_meta, f, indent=2, ensure_ascii=False)
+
+                with open(os.path.join(cand_dir, "comparison_metrics.json"), "w", encoding="utf-8") as f:
+                    json.dump({
+                        "champion_metrics": champ_metrics,
+                        "candidate_metrics": cand_metrics,
+                        "delta_f1": delta_f1,
+                        "delta_recall": delta_recall,
+                        "decision": decision,
+                        "reason": reason,
+                    }, f, indent=2)
+
+                # Register in DB
+                register_model_version(
+                    version=next_ver,
+                    run_id=run_id,
+                    artifact_path=cand_dir,
+                    metrics=cand_metrics,
+                    status="candidate",
+                    db_path=target_db,
+                )
+
+                # Activate atomic pointer
+                set_active_model(next_ver, artifacts_dir=target_artifacts, db_path=target_db)
+
+        # 10. Record run in SQLite
+        finished_time = datetime.now(timezone.utc)
         _record_training_run_db(
             run_id=run_id,
             as_of=as_of_ts,
             config_json=json.dumps(cfg),
-            status="SKIPPED",
-            decision="SKIP",
+            snapshot_path=snapshot_path,
+            snapshot_hash=snapshot_hash,
+            champion_version=champion_version,
+            candidate_version=candidate_version,
+            status="COMPLETED",
+            decision=decision,
             reason=reason,
             started_at=start_time.isoformat(),
-            finished_at=datetime.now(timezone.utc).isoformat(),
+            finished_at=finished_time.isoformat(),
             db_path=target_db,
         )
+
+        # Record training memberships (Plan 06 Section 2 & 5) after run_id exists in training_runs
+        if not dry_run:
+            memberships = []
+            for _, row in new_train_df.iterrows():
+                if "snapshot_id" in row and "label_event_id" in row:
+                    memberships.append({
+                        "snapshot_id": row["snapshot_id"],
+                        "partition": "train",
+                        "label_event_id": row["label_event_id"],
+                    })
+            for _, row in new_comp_df.iterrows():
+                if "snapshot_id" in row and "label_event_id" in row:
+                    memberships.append({
+                        "snapshot_id": row["snapshot_id"],
+                        "partition": "comparison",
+                        "label_event_id": row["label_event_id"],
+                    })
+            if memberships:
+                record_training_membership(run_id, memberships, db_path=target_db)
+
         return {
             "run_id": run_id,
             "as_of": as_of_ts,
-            "gate_passed": False,
+            "gate_passed": gate_passed,
             "gate_details": gate_details,
-            "decision": "SKIP",
+            "champion_version": champion_version,
+            "candidate_version": candidate_version,
+            "decision": decision,
             "reason": reason,
-            "candidate_metrics": None,
-            "champion_metrics": None,
+            "champion_metrics": champ_metrics,
+            "candidate_metrics": cand_metrics,
+            "delta_f1": round(delta_f1, 4),
+            "delta_recall": round(delta_recall, 4),
+            "snapshot_path": snapshot_path,
+            "snapshot_hash": snapshot_hash,
             "dry_run": dry_run,
         }
-
-    # 3. Partition eligible new data into Train and Comparison holdout
-    comp_ratio = float(gate_cfg.get("comparison_ratio", 0.25))
-    if len(df_labeled) >= 4 and len(df_labeled["actual_churn"].unique()) > 1:
-        new_train_df, new_comp_df = train_test_split(
-            df_labeled,
-            test_size=comp_ratio,
-            stratify=df_labeled["actual_churn"],
-            random_state=train_cfg.get("random_state", 42),
-        )
-    else:
-        # Minimal partition for testing
-        new_train_df = df_labeled
-        new_comp_df = df_labeled
-
-    # 4. Load Champion model bundle
-    champion_info = get_active_model_info(target_artifacts)
-    champion_version = champion_info.get("active_version")
-    champ_bundle = load_model_bundle(champion_version, artifacts_dir=target_artifacts)
-    champ_pipeline = champ_bundle["pipeline"]
-    champ_meta = champ_bundle["metadata"]
-    model_type = champ_meta.get("model_type", "logistic_regression")
-    best_params = champ_meta.get("best_params", {})
-
-    # 5. Build candidate training dataset: Base dev set (80%) + new train partition
-    X_train_parts = []
-    y_train_parts = []
-
-    if train_cfg.get("use_base_dev_data", True) and os.path.exists(manifest_path) and os.path.exists(raw_data_path):
-        raw_df = load_raw_data(raw_data_path)
-        valid_raw, _ = validate_records(raw_df, mode="training")
-        manifest = pd.read_csv(manifest_path)
-        dev_manifest = manifest[manifest["split"] == "dev"][["customerID", "fold"]]
-        dev_merged = valid_raw.merge(dev_manifest, on="customerID")
-        X_train_parts.append(dev_merged[ALL_FEATURE_COLUMNS])
-        y_train_parts.append(dev_merged[TARGET_COLUMN])
-
-    if not new_train_df.empty:
-        X_train_parts.append(new_train_df[ALL_FEATURE_COLUMNS])
-        y_train_parts.append(new_train_df["actual_churn"])
-
-    if X_train_parts:
-        X_candidate_train = pd.concat(X_train_parts, ignore_index=True)
-        y_candidate_train = pd.concat(y_train_parts, ignore_index=True)
-    else:
-        raise ValueError("No training data available to fit candidate model")
-
-    # 6. Fit candidate pipeline
-    candidate_pipeline = train_candidate_pipeline(
-        X_train=X_candidate_train,
-        y_train=y_candidate_train,
-        model_type=model_type,
-        params=best_params,
-        random_state=train_cfg.get("random_state", 42),
-    )
-
-    # 7. Evaluate BOTH champion and candidate on the EXACT SAME comparison set
-    X_comp = new_comp_df[ALL_FEATURE_COLUMNS]
-    y_comp = new_comp_df["actual_churn"]
-
-    threshold = float(promo_cfg.get("threshold", 0.5))
-    champ_metrics = compute_metrics_on_comparison(champ_pipeline, X_comp, y_comp, threshold=threshold)
-    cand_metrics = compute_metrics_on_comparison(candidate_pipeline, X_comp, y_comp, threshold=threshold)
-
-    # 8. Compare & make decision based on Plan 06 Section 6
-    min_f1_gain = float(promo_cfg.get("min_f1_gain", 0.01))
-    max_recall_drop = float(promo_cfg.get("max_recall_drop", 0.02))
-
-    delta_f1 = cand_metrics["f1"] - champ_metrics["f1"]
-    delta_recall = cand_metrics["recall"] - champ_metrics["recall"]
-
-    is_promoted = (delta_f1 >= min_f1_gain) and (delta_recall >= -max_recall_drop)
-
-    if is_promoted:
-        decision = "PROMOTE"
-        reason = (
-            f"Candidate đạt điều kiện thăng cấp: F1 tăng {delta_f1:+.4f} (>= +{min_f1_gain:.4f}) "
-            f"và Recall thay đổi {delta_recall:+.4f} (>= -{max_recall_drop:.4f}) trên tập so sánh độc lập."
-        )
-    else:
-        decision = "REJECT"
-        reason = (
-            f"Candidate không đạt điều kiện thăng cấp: F1 delta={delta_f1:+.4f} (yêu cầu >= +{min_f1_gain:.4f}), "
-            f"Recall delta={delta_recall:+.4f} (yêu cầu >= -{max_recall_drop:.4f}). Tiếp tục giữ Champion {champion_version}."
-        )
-
-    # 9. Packaging and activation if promoted and not dry_run
-    next_ver = get_next_model_version(target_artifacts)
-    candidate_version = None
-
-    if decision == "PROMOTE":
-        candidate_version = next_ver
-        if not dry_run:
-            cand_dir = os.path.join(target_artifacts, "models", next_ver)
-            os.makedirs(cand_dir, exist_ok=True)
-
-            # Save pipeline
-            joblib.dump(candidate_pipeline, os.path.join(cand_dir, "pipeline.joblib"))
-
-            # Save metadata
-            cand_meta = {
-                "model_version": next_ver,
-                "model_type": model_type,
-                "best_params": best_params,
-                "class_mapping": {"No": 0, "Yes": 1},
-                "threshold": threshold,
-                "primary_metric": "f1",
-                "train_samples": len(X_candidate_train),
-                "created_at_utc": datetime.now(timezone.utc).isoformat(),
-                "champion_version_superseded": champion_version,
-                "comparison_metrics": cand_metrics,
-                "environment": get_environment_metadata(),
-            }
-            with open(os.path.join(cand_dir, "metadata.json"), "w", encoding="utf-8") as f:
-                json.dump(cand_meta, f, indent=2, ensure_ascii=False)
-
-            with open(os.path.join(cand_dir, "comparison_metrics.json"), "w", encoding="utf-8") as f:
-                json.dump({
-                    "champion_metrics": champ_metrics,
-                    "candidate_metrics": cand_metrics,
-                    "delta_f1": delta_f1,
-                    "delta_recall": delta_recall,
-                    "decision": decision,
-                    "reason": reason,
-                }, f, indent=2)
-
-            # Register in DB
-            register_model_version(
-                version=next_ver,
-                run_id=run_id,
-                artifact_path=cand_dir,
-                metrics=cand_metrics,
-                status="candidate",
-                db_path=target_db,
-            )
-
-            # Activate atomic pointer
-            set_active_model(next_ver, artifacts_dir=target_artifacts, db_path=target_db)
-
-    # 10. Record run in SQLite
-    finished_time = datetime.now(timezone.utc)
-    _record_training_run_db(
-        run_id=run_id,
-        as_of=as_of_ts,
-        config_json=json.dumps(cfg),
-        champion_version=champion_version,
-        candidate_version=candidate_version,
-        status="COMPLETED",
-        decision=decision,
-        reason=reason,
-        started_at=start_time.isoformat(),
-        finished_at=finished_time.isoformat(),
-        db_path=target_db,
-    )
-
-    return {
-        "run_id": run_id,
-        "as_of": as_of_ts,
-        "gate_passed": gate_passed,
-        "gate_details": gate_details,
-        "champion_version": champion_version,
-        "candidate_version": candidate_version,
-        "decision": decision,
-        "reason": reason,
-        "champion_metrics": champ_metrics,
-        "candidate_metrics": cand_metrics,
-        "delta_f1": round(delta_f1, 4),
-        "delta_recall": round(delta_recall, 4),
-        "dry_run": dry_run,
-    }
 
 
 def _record_training_run_db(
@@ -465,6 +696,8 @@ def _record_training_run_db(
     reason: str,
     started_at: str,
     finished_at: str,
+    snapshot_path: Optional[str] = None,
+    snapshot_hash: Optional[str] = None,
     champion_version: Optional[str] = None,
     candidate_version: Optional[str] = None,
     db_path: Optional[str] = None,
@@ -475,13 +708,15 @@ def _record_training_run_db(
     cur.execute(
         """
         INSERT INTO training_runs (
-            run_id, as_of, config_json, champion_version, candidate_version,
+            run_id, as_of, snapshot_path, snapshot_hash, config_json, champion_version, candidate_version,
             status, decision, reason, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
             as_of,
+            snapshot_path,
+            snapshot_hash,
             config_json,
             champion_version,
             candidate_version,

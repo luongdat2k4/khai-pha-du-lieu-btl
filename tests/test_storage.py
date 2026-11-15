@@ -17,6 +17,8 @@ from telco_churn.storage import (
     record_actual_labels_batch,
     get_prediction_history,
     get_snapshots_with_labels,
+    record_training_membership,
+    get_training_memberships,
     get_db_connection,
 )
 from telco_churn.inference import load_model_bundle, predict_records
@@ -201,4 +203,73 @@ def test_record_actual_labels_batch(temp_db, sample_valid_df):
     # Verify history
     hist = get_prediction_history(has_label=True, db_path=temp_db)
     assert len(hist) == 2
+
+
+def test_record_actual_label_earlier_than_snapshot_rejected(temp_db, sample_valid_df):
+    bundle = load_model_bundle()
+    preds = predict_records(sample_valid_df.iloc[[0]], bundle)
+    save_res = save_prediction_batch(
+        inputs=sample_valid_df.iloc[[0]],
+        outputs=preds,
+        source="single_test",
+        db_path=temp_db,
+    )
+    snap_id = save_res["snapshot_ids"][0]
+
+    # Attempt to record a label with observation date 10 days before snapshot
+    with pytest.raises(ValueError, match="không được sớm hơn ngày tạo snapshot"):
+        record_actual_label(
+            snapshot_id=snap_id,
+            label="Yes",
+            observed_at="2020-01-01T00:00:00Z",
+            source="crm_agent",
+            db_path=temp_db,
+        )
+
+
+def test_training_membership_and_exclude_trained(temp_db, sample_valid_df):
+    bundle = load_model_bundle()
+    preds = predict_records(sample_valid_df.iloc[:4], bundle)
+    save_res = save_prediction_batch(
+        inputs=sample_valid_df.iloc[:4],
+        outputs=preds,
+        source="unit_test",
+        db_path=temp_db,
+    )
+    snaps = save_res["snapshot_ids"]
+    events = []
+    for s in snaps:
+        evt = record_actual_label(snapshot_id=s, label=1, observed_at="2026-11-15T00:00:00Z", source="test", db_path=temp_db)
+        events.append(evt)
+
+    # Initial query: all 4 have labels
+    labeled_df = get_snapshots_with_labels(exclude_trained=True, db_path=temp_db)
+    assert len(labeled_df) == 4
+
+    # Record training membership for run_001
+    run_id = "test_run_001"
+    conn = get_db_connection(temp_db)
+    conn.execute(
+        "INSERT INTO training_runs (run_id, as_of, status, started_at) VALUES (?, ?, ?, ?)",
+        (run_id, "2026-11-15T00:00:00Z", "COMPLETED", "2026-11-15T00:00:00Z"),
+    )
+    conn.commit()
+    conn.close()
+
+    mems = [
+        {"snapshot_id": snaps[0], "partition": "train", "label_event_id": events[0]["event_id"]},
+        {"snapshot_id": snaps[1], "partition": "train", "label_event_id": events[1]["event_id"]},
+        {"snapshot_id": snaps[2], "partition": "comparison", "label_event_id": events[2]["event_id"]},
+    ]
+    record_training_membership(run_id, mems, db_path=temp_db)
+
+    # Verify memberships recorded
+    mem_df = get_training_memberships(run_id, db_path=temp_db)
+    assert len(mem_df) == 3
+
+    # Now query with exclude_trained=True: only snaps[3] remains
+    remaining_df = get_snapshots_with_labels(exclude_trained=True, db_path=temp_db)
+    assert len(remaining_df) == 1
+    assert remaining_df["snapshot_id"].iloc[0] == snaps[3]
+
 

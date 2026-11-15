@@ -363,12 +363,32 @@ def record_actual_label(
     try:
         # Check snapshot existence
         cur.execute(
-            "SELECT snapshot_id, customer_id, created_at FROM customer_snapshots WHERE snapshot_id = ?",
+            "SELECT snapshot_id, customer_id, observed_at, created_at FROM customer_snapshots WHERE snapshot_id = ?",
             (snapshot_id,),
         )
         snap = cur.fetchone()
         if not snap:
             raise ValueError(f"Snapshot ID '{snapshot_id}' does not exist in customer_snapshots")
+
+        # Plan 06 Section 3 Item 4: Kiểm tra thời điểm quan sát nhãn không được sớm hơn snapshot
+        snap_obs = snap["observed_at"]
+        if observed_at and snap_obs:
+            try:
+                obs_clean = observed_at.replace("Z", "+00:00") if "Z" in observed_at else observed_at
+                snap_clean = snap_obs.replace("Z", "+00:00") if "Z" in snap_obs else snap_obs
+                dt_obs = datetime.fromisoformat(obs_clean)
+                dt_snap = datetime.fromisoformat(snap_clean)
+                if dt_obs.date() < dt_snap.date():
+                    raise ValueError(
+                        f"Thời điểm quan sát nhãn ({observed_at[:10]}) không được sớm hơn ngày tạo snapshot ({snap_obs[:10]})"
+                    )
+            except ValueError as ve:
+                if "không được sớm hơn" in str(ve):
+                    raise ve
+                if str(observed_at)[:10] < str(snap_obs)[:10]:
+                    raise ValueError(
+                        f"Thời điểm quan sát nhãn ({observed_at[:10]}) không được sớm hơn ngày tạo snapshot ({snap_obs[:10]})"
+                    )
 
         # Normalize label to 0 or 1
         if isinstance(label, str):
@@ -658,9 +678,14 @@ def get_training_runs(limit: int = 50, db_path: Optional[str] = None) -> pd.Data
 def get_snapshots_with_labels(
     as_of: Optional[str] = None,
     include_synthetic: bool = False,
+    exclude_trained: bool = False,
     db_path: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Retrieve all snapshots having a valid actual label up to as_of timestamp."""
+    """Retrieve all snapshots having a valid actual label up to as_of timestamp.
+
+    If exclude_trained is True, filters out snapshots that have already participated
+    in a COMPLETED training run (Plan 06 Section 4 & 7).
+    """
     conn = get_db_connection(db_path)
 
     as_of_val = as_of or datetime.now(timezone.utc).isoformat()
@@ -698,6 +723,16 @@ def get_snapshots_with_labels(
     if not include_synthetic:
         query += " AND s.is_synthetic = 0"
 
+    if exclude_trained:
+        query += """
+        AND s.snapshot_id NOT IN (
+            SELECT tm.snapshot_id
+            FROM training_membership tm
+            JOIN training_runs tr ON tm.run_id = tr.run_id
+            WHERE tr.status = 'COMPLETED'
+        )
+        """
+
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
 
@@ -724,6 +759,49 @@ def get_snapshots_with_labels(
     if "SeniorCitizen" in res_df.columns:
         res_df["SeniorCitizen"] = res_df["SeniorCitizen"].astype(str).str.replace(r"\.0$", "", regex=True)
     return res_df
+
+
+def record_training_membership(
+    run_id: str,
+    memberships: List[Dict[str, str]],
+    db_path: Optional[str] = None,
+) -> None:
+    """Record partition membership (train vs comparison) for snapshots in a retraining run.
+
+    Conforms to Plan 06 Section 2 & Section 5:
+    Populates training_membership (run_id, snapshot_id, partition, label_event_id).
+    """
+    if not memberships:
+        return
+    conn = get_db_connection(db_path)
+    cur = conn.cursor()
+    cur.executemany(
+        """
+        INSERT INTO training_membership (run_id, snapshot_id, partition, label_event_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        [(run_id, m["snapshot_id"], m["partition"], m["label_event_id"]) for m in memberships],
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_training_memberships(
+    run_id: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """Retrieve training membership records."""
+    conn = get_db_connection(db_path)
+    if run_id:
+        df = pd.read_sql_query(
+            "SELECT * FROM training_membership WHERE run_id = ?",
+            conn,
+            params=[run_id],
+        )
+    else:
+        df = pd.read_sql_query("SELECT * FROM training_membership", conn)
+    conn.close()
+    return df
 
 
 def get_model_versions_from_db(db_path: Optional[str] = None) -> pd.DataFrame:

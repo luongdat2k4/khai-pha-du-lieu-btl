@@ -11,6 +11,7 @@ from telco_churn.registry import (
     get_active_model_info,
     set_active_model,
     rollback_model,
+    reconcile_active_model,
     list_available_models,
 )
 from telco_churn.storage import (
@@ -102,51 +103,91 @@ def render_model_management():
 
     st.markdown("---")
 
-    # 3. Interactive Actions: Dry-run and Demo
-    st.subheader("3. Thao Tác Huấn Luyện Lại & Đánh Giá So Sánh")
+    # 3. Interactive Actions: 4 Scenarios conforming to Plan 06 Section 8
+    st.subheader("3. Thao Tác Huấn Luyện Lại & 4 Kịch Bản Vận Hành (Plan 06 Section 8)")
     st.markdown("""
     > [!NOTE]
-    > **Nguyên tắc an toàn (Plan 05 Section 5):** 
+    > **Nguyên tắc an toàn (Plan 05 & Plan 06):** 
     > - Không có nút bấm "thay thế mô hình mù quáng". Mọi thao tác kích hoạt candidate đều phải tuân thủ điều kiện thăng cấp khách quan (F1 gain ≥ 0.01 và Recall drop ≤ 0.02).
     > - **Dữ liệu demo là dữ liệu mô phỏng (Synthetic):** Hệ thống gắn nhãn minh bạch trên màn hình; tuyệt đối không lấy dữ liệu Test Set gốc nạp vào cơ sở dữ liệu để tạo cảm giác hệ thống đang tự học thêm.
     """)
 
-    act_col1, act_col2 = st.columns(2)
+    tab_a, tab_b, tab_c, tab_d = st.tabs([
+        "⚠️ Kịch bản A: Chưa đủ Gate (Skip)",
+        "🧪 Kịch bản B: Mô phỏng Candidate (Comparison)",
+        "🛑 Kịch bản C: Candidate kém (Reject)",
+        "🚀 Kịch bản D: Thăng cấp an toàn (Promote & Rollback)",
+    ])
 
-    with act_col1:
-        st.markdown("**A. Chạy Thử Nghiệm Kiểm Tra Cổng (Dry-run)**")
-        st.caption("Kiểm tra điều kiện cổng và chỉ số candidate mà không thay đổi mô hình đang phục vụ.")
-        if st.button("🧪 Chạy Kiểm Tra An Toàn (Dry-run)", use_container_width=True):
+    with tab_a:
+        st.markdown("**Kịch bản A: Dữ liệu mới chưa đạt cổng an toàn (Gate Insufficient)**")
+        st.caption("Kiểm tra điều kiện cổng và quyết định SKIP, bảo lưu nguyên trạng mô hình Champion đang phục vụ.")
+        if st.button("🧪 Chạy Kiểm Tra Cổng An Toàn (Kịch bản A)", key="btn_scen_a", use_container_width=True):
             with st.spinner("Đang chạy kiểm tra gate..."):
-                res = run_retraining(dry_run=True)
+                res = run_retraining(dry_run=True, ignore_gate=False)
                 if res["decision"] == "SKIP":
-                    st.warning(f"⏩ Quyết định: **SKIP**\n\nLý do: {res['reason']}")
+                    st.warning(f"⏩ **Quyết định: SKIP** (Bảo lưu Champion `{res.get('champion_version')}`)\n\n**Lý do:** {res['reason']}")
                 else:
                     st.info(f"Kết quả: **{res['decision']}** — {res['reason']}")
 
-    with act_col2:
-        st.markdown("**B. Chạy Mô Phỏng Chu Trình Cập Nhật (Demo Mode — Dữ liệu mô phỏng)**")
-        st.caption("Minh họa quy trình huấn luyện candidate, đánh giá trên tập đối chiếu và quyết định thăng cấp.")
-        if st.button("🚀 Chạy Mô Phỏng Candidate & So Sánh (Demo)", type="primary", use_container_width=True):
+    with tab_b:
+        st.markdown("**Kịch bản B: Đủ dữ liệu mô phỏng — So sánh Champion vs Candidate**")
+        st.caption("Chạy huấn luyện candidate và tính toán các chỉ số so sánh (F1, Recall, Precision, Latency) trên tập đối chiếu độc lập.")
+        if st.button("🚀 Chạy Mô Phỏng Candidate & Đối Chiếu (Kịch bản B)", key="btn_scen_b", type="primary", use_container_width=True):
             with st.spinner("Đang huấn luyện candidate và tính toán so sánh trên tập comparison..."):
                 res_demo = run_retraining(
                     dry_run=True,
                     ignore_gate=True,
                     allow_synthetic=True,
                 )
-                st.success("✅ Đã hoàn tất chu trình mô phỏng!")
+                st.success("✅ Đã hoàn tất chu trình mô phỏng đối chiếu!")
 
                 d_col1, d_col2 = st.columns(2)
                 with d_col1:
                     st.markdown(f"**Quyết định:** `{res_demo['decision']}`")
                     st.write(f"**Lý do:** {res_demo['reason']}")
+                    if res_demo.get("snapshot_path"):
+                        st.caption(f"Snapshot File: `{res_demo['snapshot_path']}`")
+                        st.caption(f"SHA-256 Hash: `{res_demo.get('snapshot_hash', 'N/A')[:16]}...`")
                 with d_col2:
                     if res_demo.get("candidate_metrics") and res_demo.get("champion_metrics"):
                         champ = res_demo["champion_metrics"]
                         cand = res_demo["candidate_metrics"]
-                        st.write(f"- Champion F1: **{champ['f1']:.4f}**")
-                        st.write(f"- Candidate F1: **{cand['f1']:.4f}** (Delta: `{res_demo.get('delta_f1'):+.4f}`)")
+                        st.write(f"- Champion F1: **{champ['f1']:.4f}** | Latency: `{champ.get('prediction_time_ms', 0):.2f} ms`")
+                        st.write(f"- Candidate F1: **{cand['f1']:.4f}** (Delta: `{res_demo.get('delta_f1'):+.4f}`) | Latency: `{cand.get('prediction_time_ms', 0):.2f} ms`")
                         st.write(f"- Candidate Recall: **{cand['recall']:.4f}** (Delta: `{res_demo.get('delta_recall'):+.4f}`)")
+
+    with tab_c:
+        st.markdown("**Kịch bản C: Candidate không đạt tiêu chuẩn thăng cấp (Reject)**")
+        st.caption("Minh họa trường hợp Candidate có chỉ số F1 tăng chưa đủ 0.01 hoặc Recall sụt giảm quá 0.02. Hệ thống kiên quyết từ chối kích hoạt.")
+        if st.button("🛑 Mô Phỏng Quyết Định Từ Chối (Kịch bản C)", key="btn_scen_c", use_container_width=True):
+            with st.spinner("Đang chạy đối soát ngưỡng thăng cấp nghiêm ngặt..."):
+                strict_cfg = load_retraining_config()
+                strict_cfg["promotion_policy"]["min_f1_gain"] = 0.50  # Unattainable threshold to demo rejection
+                res_c = run_retraining(
+                    dry_run=True,
+                    ignore_gate=True,
+                    allow_synthetic=True,
+                    config=strict_cfg,
+                )
+                st.error(f"🛑 **Quyết định: {res_c['decision']}**")
+                st.write(f"**Lý do:** {res_c['reason']}")
+                if res_c.get("champion_version"):
+                    st.info(f"✅ Hệ thống bảo toàn an toàn phiên bản Champion: `{res_c['champion_version']}`.")
+
+    with tab_d:
+        st.markdown("**Kịch bản D: Candidate đạt chuẩn ➜ Thăng cấp (Promote), Kích hoạt & Rollback**")
+        st.caption("Khi candidate vượt qua gate, cải thiện chỉ số và vượt qua smoke test, hệ thống kích hoạt nguyên tử phiên bản mới.")
+        if st.button("🌟 Chạy Thử Thăng Cấp Candidate (Kịch bản D — Dry-run/Inspect)", key="btn_scen_d", use_container_width=True):
+            with st.spinner("Đang chạy chu trình thẩm định thăng cấp..."):
+                res_d = run_retraining(
+                    dry_run=True,
+                    ignore_gate=True,
+                    allow_synthetic=True,
+                )
+                st.info(f"**Kết quả thẩm định:** `{res_d['decision']}`")
+                st.write(f"**Chi tiết:** {res_d['reason']}")
+                st.caption("Ghi chú: Nút này chạy ở chế độ dry-run an toàn để thanh tra trước khi kích hoạt.")
 
     st.markdown("---")
 
@@ -167,7 +208,7 @@ def render_model_management():
     st.markdown("---")
 
     # 5. Rollback and Model Versions
-    st.subheader("5. Danh Sách Phiên Bản Mô Hình & Hoàn Tác (Rollback)")
+    st.subheader("5. Danh Sách Phiên Bản Mô Hình, Đối Soát & Hoàn Tác (Rollback)")
 
     models_list = list_available_models()
     if models_list:
@@ -182,18 +223,27 @@ def render_model_management():
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-    # Rollback action
-    rb_col1, rb_col2 = st.columns([2, 1])
+    # Rollback & Reconcile actions
+    rb_col1, rb_col2, rb_col3 = st.columns([2, 1, 1])
     with rb_col1:
         st.markdown(
             "Trong trường hợp mô hình mới phát sinh sai lệch hoặc lỗi nghiệp vụ, "
             "quản trị viên có thể hoàn tác ngay lập tức về phiên bản đã kiểm chứng trước đó."
         )
     with rb_col2:
-        if st.button("⏪ Hoàn Tác Về Phiên Bản Trước (Rollback)", type="secondary", use_container_width=True):
+        if st.button("🔄 Đối Soát & Đồng Bộ (Reconcile)", use_container_width=True):
+            try:
+                rec_info = reconcile_active_model()
+                st.success(f"✅ Đã đối soát thành công! Phiên bản Active: `{rec_info['active_version']}`")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Lỗi đối soát: {e}")
+    with rb_col3:
+        if st.button("⏪ Hoàn Tác Về Trước (Rollback)", type="secondary", use_container_width=True):
             try:
                 rb_info = rollback_model()
                 st.success(f"✅ Đã hoàn tác thành công về phiên bản: `{rb_info['active_version']}`!")
                 st.rerun()
             except Exception as e:
+                st.error(f"❌ Không thể hoàn tác: {e}")
                 st.error(f"❌ Không thể hoàn tác: {e}")

@@ -65,7 +65,6 @@ def build_base_classifier(model_name: str, random_state: int = 42, **kwargs):
         return DummyClassifier(strategy="most_frequent")
     elif name in ["logistic", "logistic_regression", "lr"]:
         return LogisticRegression(
-            penalty="l2",
             solver="lbfgs",
             max_iter=2000,
             random_state=random_state,

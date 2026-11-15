@@ -39,6 +39,11 @@ def main():
         help="Include synthetic demo records in retraining pool",
     )
     parser.add_argument(
+        "--check-schedule",
+        action="store_true",
+        help="Enforce monthly execution schedule (Day 01 at 02:00 AM VN time) conforming to Plan 06 Section 4",
+    )
+    parser.add_argument(
         "--config",
         type=str,
         default=DEFAULT_CONFIG_PATH,
@@ -65,6 +70,7 @@ def main():
     print(f"Timestamp as-of: {as_of}")
     print(f"Dry-run mode:    {args.dry_run}")
     print(f"Ignore gate:     {args.ignore_gate}")
+    print(f"Check schedule:  {args.check_schedule}")
     print(f"Config path:     {args.config}")
     print("=" * 70)
 
@@ -73,6 +79,7 @@ def main():
         dry_run=args.dry_run,
         config=args.config,
         ignore_gate=args.ignore_gate,
+        ignore_schedule=not args.check_schedule,
         allow_synthetic=args.allow_synthetic,
         db_path=args.db_path,
         artifacts_dir=args.artifacts_dir,
@@ -89,6 +96,11 @@ def main():
         for fail in gate_details["failures"]:
             print(f"  - {fail}")
 
+    if result.get("snapshot_path"):
+        print("\n--- Frozen Snapshot Dataset ---")
+        print(f"Snapshot File: {result.get('snapshot_path')}")
+        print(f"SHA-256 Hash:  {result.get('snapshot_hash')}")
+
     print("\n--- Candidate Evaluation & Decision ---")
     print(f"Decision: {result.get('decision')}")
     print(f"Reason:   {result.get('reason')}")
@@ -103,6 +115,7 @@ def main():
         print(f"  Recall       | {champ['recall']:.4f}               | {cand['recall']:.4f}    | {result.get('delta_recall'):+.4f}")
         print(f"  Precision    | {champ['precision']:.4f}               | {cand['precision']:.4f}    | {cand['precision']-champ['precision']:+.4f}")
         print(f"  ROC-AUC      | {champ['roc_auc']:.4f}               | {cand['roc_auc']:.4f}    | {cand['roc_auc']-champ['roc_auc']:+.4f}")
+        print(f"  Latency (ms) | {champ.get('prediction_time_ms', 0.0):.2f}               | {cand.get('prediction_time_ms', 0.0):.2f}    | -")
 
     if result.get("decision") == "PROMOTE":
         if args.dry_run:

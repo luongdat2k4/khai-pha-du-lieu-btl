@@ -15,6 +15,13 @@ from .storage import (
     DEFAULT_DB_PATH,
 )
 
+_MODEL_CACHE: Dict[str, Any] = {}
+
+
+def invalidate_active_model_cache() -> None:
+    """Clear in-memory model caches (Plan 06 Section 7 Item 3)."""
+    _MODEL_CACHE.clear()
+
 
 def validate_artifact_bundle(
     version_or_path: str,
@@ -129,6 +136,9 @@ def set_active_model(
     # Atomic replace
     shutil.move(temp_path, active_path)
 
+    # Invalidate cache
+    invalidate_active_model_cache()
+
     # 5. Synchronize DB model statuses if DB exists
     effective_db = db_path or DEFAULT_DB_PATH
     if os.path.exists(effective_db):
@@ -177,7 +187,56 @@ def rollback_model(
             raise ValueError("No previous model version available for rollback")
 
     # Set previous version as active
-    return set_active_model(prev_version, artifacts_dir=artifacts_dir, db_path=db_path)
+    res = set_active_model(prev_version, artifacts_dir=artifacts_dir, db_path=db_path)
+    invalidate_active_model_cache()
+    return res
+
+
+def reconcile_active_model(
+    artifacts_dir: str = "artifacts",
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Reconcile active_model.json pointer with SQLite database state.
+
+    Conforms to Plan 06 Section 7 Item 2:
+    "Cập nhật con trỏ active một cách nguyên tử, tránh DB và file pointer chỉ sang hai phiên bản khác nhau.
+     Có bước đối soát và phục hồi nếu cập nhật giữa chừng thất bại."
+    """
+    effective_db = db_path or DEFAULT_DB_PATH
+    active_info = get_active_model_info(artifacts_dir)
+    active_ver = active_info.get("active_version")
+
+    if os.path.exists(effective_db) and active_ver:
+        from .storage import get_db_connection
+        conn = get_db_connection(effective_db)
+        cur = conn.cursor()
+        cur.execute("SELECT model_version, status FROM model_versions WHERE model_version = ?", (active_ver,))
+        row = cur.fetchone()
+        model_dir = os.path.join(artifacts_dir, "models", active_ver)
+
+        if not row:
+            upsert_model_version(
+                model_version=active_ver,
+                run_id=active_info.get("metadata", {}).get("run_id"),
+                artifact_path=model_dir,
+                metrics=active_info.get("metadata", {}).get("test_metrics"),
+                status="active",
+                schema_version="1.0",
+                db_path=effective_db,
+            )
+        elif row["status"] != "active":
+            update_model_status(active_ver, "active", effective_db)
+
+        # Archive any other version that was mistakenly left active
+        cur.execute(
+            "UPDATE model_versions SET status = 'archived' WHERE model_version != ? AND status = 'active'",
+            (active_ver,),
+        )
+        conn.commit()
+        conn.close()
+
+    invalidate_active_model_cache()
+    return active_info
 
 
 def register_model_version(
