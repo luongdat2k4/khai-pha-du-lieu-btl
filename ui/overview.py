@@ -24,13 +24,13 @@ def render_overview():
         active_type = "N/A"
 
     with col1:
-        st.metric("Phiên bản Active", active_ver)
+        st.metric("Phiên bản Active", active_ver, delta="Mô hình Champion", delta_color="off")
     with col2:
-        st.metric("Kiến trúc Mô hình", active_type.replace("_", " ").title())
+        st.metric("Kiến trúc Mô hình", active_type.replace("_", " ").title(), delta="Balanced Weights", delta_color="off")
     with col3:
-        st.metric("Bộ dữ liệu gốc", "7.043 bản ghi")
+        st.metric("Bộ dữ liệu gốc", "7.043 bản ghi", delta="IBM Telco Churn", delta_color="off")
     with col4:
-        st.metric("Số đặc trưng", "19 đầu vào")
+        st.metric("Số đặc trưng", "19 đầu vào", delta="4 nhóm nghiệp vụ", delta_color="off")
 
     st.markdown("---")
 

@@ -86,15 +86,15 @@ def render_model_results():
         champ_test = test_data.get("champion_test_metrics", {})
         tc1, tc2, tc3, tc4, tc5 = st.columns(5)
         with tc1:
-            st.metric("Test Accuracy (Champion)", f"{champ_test.get('accuracy', 0.0):.2%}")
+            st.metric("Test Accuracy", f"{champ_test.get('accuracy', 0.0):.2%}", delta="Champion Model", delta_color="off")
         with tc2:
-            st.metric("Test F1 Lớp 1 (Champion)", f"{champ_test.get('f1', 0.0):.4f}")
+            st.metric("Test F1 Lớp 1", f"{champ_test.get('f1', 0.0):.4f}", delta="Harmonic Mean", delta_color="off")
         with tc3:
-            st.metric("Test Recall Lớp 1 (Champion)", f"{champ_test.get('recall', 0.0):.2%}")
+            st.metric("Test Recall Lớp 1", f"{champ_test.get('recall', 0.0):.2%}", delta="Bảo vệ doanh thu", delta_color="off")
         with tc4:
-            st.metric("Test Precision (Champion)", f"{champ_test.get('precision', 0.0):.2%}")
+            st.metric("Test Precision", f"{champ_test.get('precision', 0.0):.2%}", delta="Độ chuẩn xác", delta_color="off")
         with tc5:
-            st.metric("Test ROC-AUC (Champion)", f"{champ_test.get('roc_auc', 0.0):.4f}")
+            st.metric("Test ROC-AUC", f"{champ_test.get('roc_auc', 0.0):.4f}", delta="Khả năng phân tách", delta_color="off")
 
         # Full Test Set Comparison Table for all models
         all_test = test_data.get("all_models_test_metrics", {})

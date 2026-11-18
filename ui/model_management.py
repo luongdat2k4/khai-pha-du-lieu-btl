@@ -53,13 +53,13 @@ def render_model_management():
 
     ac1, ac2, ac3, ac4 = st.columns(4)
     with ac1:
-        st.metric("Phiên bản Active", active_ver)
+        st.metric("Phiên bản Active", active_ver, delta="Champion phục vụ", delta_color="off")
     with ac2:
-        st.metric("Kiến trúc", active_type.replace("_", " ").title())
+        st.metric("Kiến trúc", active_type.replace("_", " ").title(), delta="L2 Regularized", delta_color="off")
     with ac3:
-        st.metric("Phiên bản trước", prev_ver or "Gốc")
+        st.metric("Phiên bản trước", prev_ver or "Gốc", delta="Sẵn sàng rollback", delta_color="off")
     with ac4:
-        st.metric("Ngày Retrain gần nhất", last_retrain_str)
+        st.metric("Ngày Retrain gần nhất", last_retrain_str, delta="Audit Log", delta_color="off")
 
     st.markdown("---")
 

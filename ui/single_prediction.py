@@ -242,18 +242,35 @@ def render_single_prediction():
         label = res["churn_label"]
 
         with res_col1:
-            st.metric("Điểm nguy cơ (Score)", f"{score:.2%}")
+            st.metric(
+                label="Điểm nguy cơ (Score)",
+                value=f"{score:.2%}",
+                delta="Nguy cơ cao" if score >= float(res["threshold"]) else "Nguy cơ thấp",
+                delta_color="off",
+            )
         with res_col2:
-            st.metric("Dự đoán Churn", f"{label} (Threshold={res['threshold']})")
+            st.metric(
+                label="Dự đoán Churn",
+                value=f"{label}",
+                delta=f"Ngưỡng chuẩn = {res['threshold']}",
+                delta_color="off",
+            )
         with res_col3:
-            if priority == "Cao":
-                st.error(f"🔴 Mức ưu tiên: **{priority}** (≥60%)")
-            elif priority == "Trung bình":
-                st.warning(f"🟡 Mức ưu tiên: **{priority}** (30%–60%)")
-            else:
-                st.success(f"🟢 Mức ưu tiên: **{priority}** (<30%)")
+            badge_icon = "🔴" if priority == "Cao" else "🟡" if priority == "Trung bình" else "🟢"
+            threshold_desc = "≥60%" if priority == "Cao" else "30%–60%" if priority == "Trung bình" else "<30%"
+            st.metric(
+                label="Mức ưu tiên CSKH",
+                value=f"{badge_icon} {priority}",
+                delta=f"Khoảng điểm: {threshold_desc}",
+                delta_color="off",
+            )
         with res_col4:
-            st.metric("Phiên bản Model", res["model_version"])
+            st.metric(
+                label="Phiên bản Model",
+                value=res["model_version"],
+                delta="Mô hình Champion",
+                delta_color="off",
+            )
 
         # Interpretation & Action box
         st.markdown("#### 💡 Khuyến nghị nghiệp vụ chăm sóc khách hàng:")

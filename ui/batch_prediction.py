@@ -225,13 +225,14 @@ def render_batch_prediction():
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.metric("Tổng số bản ghi dự đoán", f"{total_records:,}")
+            st.metric("Tổng số bản ghi dự đoán", f"{total_records:,}", delta="Dữ liệu kiểm tra", delta_color="off")
         with c2:
-            st.metric("Dự báo Churn = Yes", f"{churn_yes_count:,} ({churn_rate:.1%})")
+            st.metric("Dự báo Churn = Yes", f"{churn_yes_count:,}", delta=f"Tỷ lệ: {churn_rate:.1%}", delta_color="off")
         with c3:
-            st.metric("Ưu tiên Cao (🔴 ≥60%)", f"{high_risk_count:,} ({high_risk_count/total_records:.1%})")
+            high_pct = f"{high_risk_count/total_records:.1%}" if total_records > 0 else "0%"
+            st.metric("Ưu tiên Cao (🔴 ≥60%)", f"{high_risk_count:,}", delta=f"Tỷ lệ: {high_pct}", delta_color="off")
         with c4:
-            st.metric("Ưu tiên TB / Thấp", f"{med_risk_count:,} / {low_risk_count:,}")
+            st.metric("Ưu tiên TB / Thấp", f"{med_risk_count:,} / {low_risk_count:,}", delta="Phân bổ CSKH", delta_color="off")
 
         st.caption(
             "📌 **Quy ước hệ thống (Plan 05 Section 2):** Nhãn Churn='Yes' khi điểm score ≥ 0.50 (ngưỡng quyết định mô hình). "
